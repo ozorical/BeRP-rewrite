@@ -1,6 +1,7 @@
 import {
   RealmAPIJoinInfo,
   RealmAPIWorldsRes,
+  RealmAPIWorld,
 } from "../../types/berp"
 import { BaseCommand } from "./base/BaseCommand"
 import { BeRP } from "../../berp"
@@ -11,7 +12,7 @@ export class Connect extends BaseCommand {
   private _berp: BeRP
   public name = "connect"
   public description = "Connect account to realm."
-  public usage = ""
+  public usage = "connect [host] [port]  # direct server\nconnect          # interactive Realm picker"
   public aliases = [
     "c",
   ]
@@ -19,7 +20,10 @@ export class Connect extends BaseCommand {
     super()
     this._berp = berp
   }
-  public async execute(): Promise<void> {
+  public async execute(argv: string[]): Promise<void> {
+    const [hostArg, portArg] = argv
+    const directHostPort = hostArg && portArg && !isNaN(parseInt(portArg))
+
     const accounts = await this._berp
       .getAuthProvider()
       .getCache()
@@ -38,7 +42,48 @@ export class Connect extends BaseCommand {
               return this._berp.getNetworkManager().getLogger()
                 .error(`Failed to select account "${username}"`)
             }
-  
+
+            // Direct host:port connect (non-Realms)
+            if (directHostPort) {
+              const host = hostArg
+              const port = parseInt(portArg)
+
+              let net = this._berp.getNetworkManager().getAccounts()
+                .get(account.username)
+              if (!net) {
+                net = this._berp.getNetworkManager().create(account)
+              }
+
+              const realmStub: RealmAPIWorld = {
+                id: Date.now(),
+                remoteSubscriptionId: '',
+                owner: account.name,
+                ownerUUID: account.homeAccountId,
+                name: `${host}:${port}`,
+                motd: '',
+                defaultPermission: '',
+                state: 'OPEN',
+                daysLeft: 0,
+                expired: false,
+                expiredTrial: false,
+                gracePeriod: false,
+                worldType: 'NORMAL',
+                players: [],
+                maxPlayers: 0,
+                minigameName: '',
+                minigameId: null,
+                minigameImage: null,
+                activeSlot: 1,
+                slots: [],
+                member: true,
+                clubId: 0,
+                subscriptionRefreshStatus: null,
+              }
+
+              net.newConnection(host, port, realmStub)
+              return
+            }
+
             const authRes = await this._berp.getAuthProvider().aquireTokenFromCache({
               scopes: C.Scopes,
               account,

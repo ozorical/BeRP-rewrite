@@ -2,8 +2,9 @@ import { MCHeaders } from "./types/berp"
 import { resolve } from 'path'
 
 export const ProtoDataPath = resolve(process.cwd(), 'data')
-export const CUR_VERSION = '1.19.20'
-export const CUR_VERSION_PROTOCOL = 544
+// Updated to latest bedrock-protocol supported version
+export const CUR_VERSION = '1.21.93'
+export const CUR_VERSION_PROTOCOL = 819
 export const BeRP_VERSION = '1.0.0'
 
 const MCRAPI = "https://pocket.realms.minecraft.net/"

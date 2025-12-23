@@ -74,14 +74,13 @@ export class ConnectionManager {
       try {
         if (!this._accountAuthRes) await this._authRefresh()
         const newConnection = new ConnectionHandler(host, port, realm, this, this._berp)
-        const xsts = await this._berp.getAuthProvider()
-          .ezXSTSForRealmRak(this._accountAuthRes)
-        await newConnection.authMc(xsts)
         this._connections.set(realm.id, newConnection)
 
         newConnection.once('rak_ready', () => {
           r(newConnection)
         })
+
+        newConnection.once('error', (err) => rj(err))
 
         newConnection.connect()
       } catch (error) {

@@ -1,89 +1,102 @@
-import {
-  Packets,
-  packet_disconnect,
-  packet_player_list,
-  packet_start_game,
-  PlayerRecordsRecord,
-} from "../../types/packets.i"
-import { RakManager } from "../raknet"
+import { EventEmitter } from 'events'
+import { Client, createClient } from 'bedrock-protocol'
 import { Logger } from '../../console'
-import { ConnectionManager } from "./ConnectionManager"
+import { ConnectionManager } from './ConnectionManager'
 import {
   ActivePlugin,
   RealmAPIWorld,
-} from "src/types/berp"
-import { BeRP } from ".."
-// TODO: Client/plugins can control connection/diconnection of rak
+  XboxProfile,
+} from 'src/types/berp'
+import { BeRP } from '..'
+import { CUR_VERSION } from '../../Constants'
 
-
-export class ConnectionHandler extends RakManager {
-  public static readonly KEEPALIVEINT = 10
+/**
+ * Thin wrapper around bedrock-protocol's Client to preserve the
+ * ConnectionHandler surface expected by the existing plugin API.
+ */
+export class ConnectionHandler extends EventEmitter {
   public readonly host: string
   public readonly port: number
   public readonly realm: RealmAPIWorld
-  public playerQue: PlayerRecordsRecord[] = []
-  private _gameInfo: packet_start_game
+  public readonly id: number
+  public playerQue: any[] = []
   private _tickSync = 0n
-  private _tickSyncKeepAlive: NodeJS.Timer
   private _connectionManager: ConnectionManager
   private _log: Logger
   private _plugins = new Map<string, ActivePlugin>()
   private _berp: BeRP
+  private _client: Client
+  private _profile: XboxProfile
+
   constructor(host: string, port: number, realm: RealmAPIWorld, cm: ConnectionManager, berp: BeRP) {
-    super(host, port, cm.getAccount().username, realm.id)
+    super()
     this.host = host
     this.port = port
     this.realm = realm
+    this.id = realm.id
     this._connectionManager = cm
     this._berp = berp
-
     this._log = new Logger(`Connection Handler (${cm.getAccount().username}:${realm.id})`, 'cyanBright')
 
     this.setMaxListeners(Infinity)
-
-    this.once('rak_connected', this._handleLogin.bind(this))
-    this.once(Packets.ServerToClientHandshake, this._handleHandshake.bind(this))
-    this.once(Packets.ResourcePacksInfo, async () => {
-      await this._handleAcceptPacks()
-      await this._cachedChunks()
-    })
-    this.once(Packets.ResourcePacksStack, this._handleAcceptPacks.bind(this))
-    this.once(Packets.StartGame, this._handleGameStart.bind(this))
-    this.on(Packets.PlayerList, this._playerQue.bind(this))
-    this.once(Packets.Disconnect, this._handleDisconnect.bind(this))
-    this.once('rak_closed', this._handleDisconnect.bind(this))
-
-    this.on(Packets.TickSync, (pak) => {
-      this._tickSync = pak.response_time
-    })
-    this._log.success("Initialized")
-    // TEMP ---- Bad Bad Bad... Dont care tho lol. BeRP v2 coming soon
-    // The start_game packet isn't being detected by BeRP anymore, very strange...
-    setTimeout(async () => {
-      if(this._gameInfo) return
-      this._registerPlugins()
-      
-      this.emit("rak_ready")
-      this.removeListener('player_list', this._playerQue)
-      await this.sendPacket(Packets.TickSync, {
-        request_time: BigInt(Date.now()),
-        response_time: 0n,
-      })
-      this._tickSyncKeepAlive = setInterval(async () => {
-        await this.sendPacket(Packets.TickSync, {
-          request_time: this._tickSync,
-          response_time: 0n,
-        })
-      }, 50 * ConnectionHandler.KEEPALIVEINT)
-    }, 5000)
+    this._log.success('Initialized')
   }
-  public getGameInfo(): packet_start_game { return this._gameInfo }
+
+  public getGameInfo(): any { return undefined }
   public getLogger(): Logger { return this._log }
   public getTick(): bigint { return this._tickSync }
   public getConnectionManager(): ConnectionManager { return this._connectionManager }
+  public getClient(): Client { return this._client }
+  public getXboxProfile(): XboxProfile { return this._profile }
+  public getRakLogger(): Logger { return this._log }
+
+  public connect(): void {
+    // bedrock-protocol handles authentication/handshake internally.
+    this._client = createClient({
+      host: this.host,
+      port: this.port,
+      version: CUR_VERSION as any,
+      // Offline mode avoids Microsoft entitlement checks.
+      offline: true,
+      raknetBackend: 'raknet-native',
+      username: this._connectionManager.getAccount()?.username || 'BeRP',
+      conLog: () => undefined,
+    })
+
+    // Forward all packets by name to maintain existing listeners.
+    this._client.on('packet', (des: any) => {
+      const { name, params } = des.data
+      if (name === 'tick_sync') {
+        this._tickSync = params.response_time ?? 0n
+      }
+      this.emit(name, params)
+    })
+
+    this._client.on('start_game', (pak) => {
+      this._profile = this._buildOfflineProfile()
+      this.emit('rak_ready')
+      this._registerPlugins()
+    })
+
+    this._client.on('player_list', (packet) => {
+      this._playerQue(packet)
+    })
+
+    this._client.on('disconnect', (reason) => {
+      this._handleDisconnect(reason?.message || 'Disconnected')
+    })
+
+    this._client.on('close', () => {
+      this._handleDisconnect('Connection closed')
+    })
+
+    this._client.on('spawn', () => {
+      this.emit('rak_ready')
+    })
+  }
 
   public close(): void {
-    super.close()
+    this._client?.close()
     this.removeAllListeners()
     this._connectionManager.getConnections().delete(this.realm.id)
   }
@@ -100,68 +113,26 @@ export class ConnectionHandler extends RakManager {
     })
   }
 
-  private _playerQue(pak?: packet_player_list) {
+  public async sendPacket(name: string, params: Record<string, any>): Promise<{ name: string, params: Record<string, any> }> {
+    this._client.queue(name, params)
+    return { name, params }
+  }
+
+  private _playerQue(pak?: any) {
+    if (!pak?.records?.records) return
     for (const record of pak.records.records) {
-      if (record.username == this.getXboxProfile().extraData.displayName) continue
+      if (this._profile && record.username == this._profile?.extraData?.displayName) continue
       this.playerQue.push(record)
     }
   }
 
-  private async _handleDisconnect(pak?: packet_disconnect): Promise<void> {
-    let reason = "Rak Connection Terminated"
-    if (pak) {
-      reason = pak.message
-    }
-
+  private async _handleDisconnect(reason: string): Promise<void> {
     await this._berp.getPluginManager().killPlugins(this)
-    clearInterval(this._tickSyncKeepAlive)
     this.close()
     this._log.warn(`Terminating connection handler with connection "${this.host}:${this.port}"`)
+    this._log.warn('Disconnection on', `${this.host}:${this.port}`, `"${reason}"`)
+  }
 
-    this._log.warn("Disconnection on", `${this.host}:${this.port}`, `"${reason}"`)
-  }
-  private async _handleLogin(): Promise<void> {
-    await this.sendPacket(Packets.Login, this.createLoginPayload())
-  }
-  private async _handleHandshake(): Promise<void> {
-    setTimeout(async () => {
-      await this.sendPacket(Packets.ClientToServerHandshake, {})
-    },0)
-  }
-  private async _handleAcceptPacks(): Promise<void> {
-    await this.sendPacket(Packets.ResourcePackClientResponse, {
-      response_status: 'completed',
-      resourcepackids: [],
-    })
-  }
-  private async _cachedChunks(): Promise<void> {
-    await this.sendPacket(Packets.ClientCacheStatus, {
-      enabled: false,
-    })
-    await this.sendPacket(Packets.RequestChunkRadius, {
-      chunk_radius: 1,
-    })
-  }
-  private async _handleGameStart(pak: packet_start_game): Promise<void> {
-    console.log('game started... If you see this, message PMK744.')
-    this._gameInfo = pak
-    await this.sendPacket(Packets.SetLocalPlayerAsInitialized, {
-      runtime_entity_id: pak.runtime_entity_id,
-    })
-    this.emit("rak_ready")
-    this._registerPlugins()
-    this.removeListener('player_list', this._playerQue)
-    await this.sendPacket(Packets.TickSync, {
-      request_time: BigInt(Date.now()),
-      response_time: 0n,
-    })
-    this._tickSyncKeepAlive = setInterval(async () => {
-      await this.sendPacket(Packets.TickSync, {
-        request_time: this._tickSync,
-        response_time: 0n,
-      })
-    }, 50 * ConnectionHandler.KEEPALIVEINT)
-  }
   private async _registerPlugins(): Promise<void> {
     const plugins = await this._berp.getPluginManager().registerPlugins(this)
     for (const plugin of plugins) {
@@ -169,4 +140,22 @@ export class ConnectionHandler extends RakManager {
     }
   }
   public getPlugins(): Map<string, ActivePlugin> { return this._plugins }
+
+  private _buildOfflineProfile(): XboxProfile {
+    const name = this._connectionManager.getAccount()?.username || 'BeRP'
+    return {
+      nbf: 0,
+      extraData: {
+        XUID: '',
+        identity: '',
+        displayName: name,
+        titleId: 0,
+      },
+      randomNonce: 0,
+      iss: '',
+      exp: 0,
+      iat: 0,
+      identityPublicKey: '',
+    }
+  }
 }
