@@ -1,7 +1,7 @@
 {
   "name": "berp",
   "version": "1.0.0",
-  "description": "a raknet implementation solution for bedrock edition realms",
+  "description": "BeRP rewrite on bedrock-protocol (offline by default, target 1.21.93)",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
