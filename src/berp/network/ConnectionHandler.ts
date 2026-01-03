@@ -9,6 +9,8 @@ import {
 } from 'src/types/berp'
 import { BeRP } from '..'
 import { CUR_VERSION } from '../../Constants'
+import { packet_add_entity } from '../../types/packets.i';
+import { PlayerRecords } from '../../types/packetTypes.i';
 
 /**
  * Thin wrapper around bedrock-protocol's Client to preserve the
@@ -51,19 +53,16 @@ export class ConnectionHandler extends EventEmitter {
   public getRakLogger(): Logger { return this._log }
 
   public connect(): void {
-    // bedrock-protocol handles authentication/handshake internally.
     this._client = createClient({
       host: this.host,
       port: this.port,
       version: CUR_VERSION as any,
-      // Offline mode avoids Microsoft entitlement checks.
-      offline: true,
+      offline: false,
       raknetBackend: 'raknet-native',
       username: this._connectionManager.getAccount()?.username || 'BeRP',
       conLog: () => undefined,
     })
 
-    // Forward all packets by name to maintain existing listeners.
     this._client.on('packet', (des: any) => {
       const { name, params } = des.data
       if (name === 'tick_sync') {
@@ -73,7 +72,7 @@ export class ConnectionHandler extends EventEmitter {
     })
 
     this._client.on('start_game', (pak) => {
-      this._profile = this._buildOfflineProfile()
+      this._profile = (this._client as any).profile as XboxProfile
       this.emit('rak_ready')
       this._registerPlugins()
     })
@@ -126,6 +125,13 @@ export class ConnectionHandler extends EventEmitter {
     }
   }
 
+  private async packet_add_entity(pak?: any): Promise<void> {
+    if (!pak?.records?.records) return
+    // to be finished
+    // adding packets asyncronously
+  }
+
+
   private async _handleDisconnect(reason: string): Promise<void> {
     await this._berp.getPluginManager().killPlugins(this)
     this.close()
@@ -140,22 +146,4 @@ export class ConnectionHandler extends EventEmitter {
     }
   }
   public getPlugins(): Map<string, ActivePlugin> { return this._plugins }
-
-  private _buildOfflineProfile(): XboxProfile {
-    const name = this._connectionManager.getAccount()?.username || 'BeRP'
-    return {
-      nbf: 0,
-      extraData: {
-        XUID: '',
-        identity: '',
-        displayName: name,
-        titleId: 0,
-      },
-      randomNonce: 0,
-      iss: '',
-      exp: 0,
-      iat: 0,
-      identityPublicKey: '',
-    }
-  }
 }
